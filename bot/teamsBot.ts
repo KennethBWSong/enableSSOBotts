@@ -1,9 +1,11 @@
 import { default as axios } from "axios";
 import * as querystring from "querystring";
-import { TeamsActivityHandler, CardFactory, TurnContext, AdaptiveCardInvokeValue, AdaptiveCardInvokeResponse} from "botbuilder";
+import { TeamsActivityHandler, CardFactory, TurnContext, AdaptiveCardInvokeValue, AdaptiveCardInvokeResponse, MemoryStorage, BotState, ConversationState, SigninStateVerificationQuery } from "botbuilder";
 import rawWelcomeCard from "./adaptiveCards/welcome.json"
 import rawLearnCard from "./adaptiveCards/learn.json"
 import { AdaptiveCards } from "@microsoft/adaptivecards-tools";
+import { SSODialog } from "./helpers/ssoDialog";
+import { OnBehalfOfUserCredential } from "@microsoft/teamsfx";
 
 export interface DataInterface {
   likeCount: number
@@ -12,11 +14,19 @@ export interface DataInterface {
 export class TeamsBot extends TeamsActivityHandler {
   // record the likeCount
   likeCountObj: { likeCount: number };
+  dialog: SSODialog;
+  dialogState: any;
+  conversationState: BotState;
 
   constructor() {
     super();
 
+    const memoryStorage = new MemoryStorage();
+
     this.likeCountObj = { likeCount: 0 };
+    this.conversationState = new ConversationState(memoryStorage);
+    this.dialog = new SSODialog(new MemoryStorage());
+    this.dialogState = this.conversationState.createProperty("DialogState");
 
     this.onMessage(async (context, next) => {
       console.log("Running with Message Activity.");
@@ -33,8 +43,9 @@ export class TeamsBot extends TeamsActivityHandler {
       // Trigger command by IM text
       switch (txt) {
         case "welcome": {
-          const card = AdaptiveCards.declareWithoutData(rawWelcomeCard).render();
-          await context.sendActivity({ attachments: [CardFactory.adaptiveCard(card)] });
+          const ssoDialog = this.dialog;
+          ssoDialog.setSSOOperation(getDisplayName);
+          await this.dialog.run(context, this.dialogState);
           break;
         }
         case "learn": {
@@ -162,6 +173,34 @@ export class TeamsBot extends TeamsActivityHandler {
     };
     return response;
   }
+
+  async run(context: TurnContext) {
+    await super.run(context);
+
+    // Save any state changes. The load happened during the execution of the Dialog.
+    await this.conversationState.saveChanges(context, false);
+  }
+
+  async handleTeamsSigninVerifyState(
+    context: TurnContext,
+    query: SigninStateVerificationQuery
+  ) {
+    console.log(
+      "Running dialog with signin/verifystate from an Invoke Activity."
+    );
+    await this.dialog.run(context, this.dialogState);
+  }
+
+  async handleTeamsSigninTokenExchange(
+    context: TurnContext,
+    query: SigninStateVerificationQuery
+  ) {
+    await this.dialog.run(context, this.dialogState);
+  }
+
+  async onSignInInvoke(context: TurnContext) {
+    await this.dialog.run(context, this.dialogState);
+  }
 }
 
 async function createCardCommand(context: TurnContext, action: any): Promise<any> {
@@ -234,4 +273,11 @@ async function shareMessageCommand(context: TurnContext, action: any): Promise<a
       attachments: [attachment],
     },
   };
+}
+
+async function getDisplayName(context: TurnContext, ssoToken: string) {
+  console.log("start");
+  const oboCredential = new OnBehalfOfUserCredential(ssoToken);
+  const userInfo = oboCredential.getUserInfo();
+  await context.sendActivity(`Hello, ${userInfo.displayName}`);
 }
